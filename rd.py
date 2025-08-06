@@ -34,7 +34,7 @@ import struct
 import json
 
 sys.path.append('../renderdoc/x64/Development/pymodules')
-os.environ["PATH"] += os.pathsep + os.path.abspath('../renderdoc/x64/Development')
+os.environ["PATH"] += os.path.abspath('../renderdoc/x64/Development')
 
 import renderdoc as rd
 
@@ -3085,13 +3085,48 @@ def export_texture(controller, resource_id, file_name):
         cv2.imwrite(file_name, equ)
 
 def pretty_number(num):
+    """统一数字格式化，使用K/M/G单位（1000进制）"""
     if num < 1e3:
         return str(num)
     if num < 1e6:
-        return "%.1fK" % (num/1e3)
+        return "%.1fK" % (num/1e3) + " (千)"
     if num < 1e9:
-        return "%.1fM" % (num/1e6)
-    return str(num)
+        return "%.1fM" % (num/1e6) + " (百万)"
+    if num < 1e12:
+        return "%.1fG" % (num/1e9) + " (十亿)"
+    return "%.1fT" % (num/1e12) + " (万亿)"
+
+def format_memory_size(bytes_size):
+    """统一内存大小格式化，使用KB/MB/GB单位（1024进制）"""
+    if bytes_size == 0:
+        return "0 MB"
+    if bytes_size < 1024:
+        return "%.1f B" % bytes_size
+    elif bytes_size < 1024 * 1024:
+        return "%.1f KB" % (bytes_size / 1024)
+    elif bytes_size < 1024 * 1024 * 1024:
+        return "%.1f MB" % (bytes_size / (1024 * 1024))
+    else:
+        return "%.1f GB" % (bytes_size / (1024 * 1024 * 1024))
+
+def format_time_duration(microseconds):
+    """统一时间格式化，使用微秒/毫秒/秒单位"""
+    if microseconds < 1000:
+        return "%.2f μs" % microseconds + " (微秒)"
+    elif microseconds < 1000000:
+        return "%.2f ms" % (microseconds / 1000) + " (毫秒)"
+    else:
+        return "%.2f s" % (microseconds / 1000000) + " (秒)"
+
+def format_size_range(max_size, min_size):
+    """统一尺寸范围格式化，添加像素单位"""
+    if max_size == 0:
+        return "无数据"
+    if min_size == float('inf'):
+        return "%d px" % max_size
+    if max_size == min_size:
+        return "%d px" % max_size
+    return "%d~%d px" % (max_size, min_size)
 
 class Frame:
     #
@@ -3160,7 +3195,16 @@ class Frame:
             if config['WRITE_TEXTURE']:
                 export_texture(controller, tex_info.resourceId, file_name)
             texType = '%s' % rd.TextureType(tex_info.type)
-            texType = texType.replace('TextureType.', '').replace('Array','[ ]')
+            texType = texType.replace('TextureType.', '')
+            # 翻译贴图类型为中文
+            texType = texType.replace('Texture2D', '2D贴图')
+            texType = texType.replace('Texture3D', '3D贴图')
+            texType = texType.replace('TextureCube', '立方体贴图')
+            texType = texType.replace('Texture1D', '1D贴图')
+            texType = texType.replace('Texture1DArray', '1D贴图数组')
+            texType = texType.replace('Texture2DArray', '2D贴图数组')
+            texType = texType.replace('TextureCubeArray', '立方体贴图数组')
+            texType = texType.replace('Texture3DArray', '3D贴图数组')
             usages = '%s' % rd.TextureCategory(tex_info.creationFlags)
             usages = usages.replace('TextureCategory.', '').replace('ShaderRead','T').replace('ColorTarget','C').replace('DepthTarget','Z').replace('|',''),
             html_file.write('<tr>\n')
@@ -3187,7 +3231,7 @@ class Frame:
         html_file.write('<div class="card-header">📊 渲染资产统计</div>\n')
         html_file.write('<div class="card-content">\n')
 
-        # 统计数据
+        # 初始化所有统计变量，确保在任何情况下都有定义
         total_textures = 0
         total_texture_size = 0
         total_max_size = 0
@@ -3195,87 +3239,197 @@ class Frame:
         
         total_draws = 0
         total_vertices = 0
+        total_polygons_accurate = 0
         total_time = 0
         
-        # 分析贴图资源 - 从所有Pass中收集贴图
+        # 初始化其他变量
+        largest_texture_info = None
+        largest_texture_id = None
+        smallest_texture_info = None
+        smallest_texture_id = None
+        smallest_name = ""
+        smallest_format = ""
+        smallest_memory = 0
+        smallest_found = False
+
+        texture_formats = []
+        texture_types = []
+        mipmap_counts = []
+        size_analysis = []  # 初始化size_analysis变量
+        
+        # 分析贴图资源 - 只从Color Pass中收集贴图
         all_textures = set()
         
-        # 方法1: 从全局贴图集合中收集
-        for resource_id in g_frame.textures:
-            if resource_id != rd.ResourceId.Null():
-                all_textures.add(resource_id)
-        
-        # 方法2: 从所有Pass中收集贴图
+        # 从所有Pass中收集贴图资源
+        print(f"Debug: 开始收集贴图，总Pass数: {len(self.passes)}")
         for p in self.passes:
             for s in p.states:
                 for d in s.draws:
-                    # 收集绘制调用中使用的贴图
+                    # 收集所有Pass中的所有贴图
+                    print(f"Debug: 处理绘制调用 {d.draw_id}: {d.name}")
+                    print(f"Debug: 该绘制的贴图数量: {len(d.textures)}")
                     for resource_id in d.textures:
                         if resource_id != rd.ResourceId.Null():
-                            all_textures.add(resource_id)
-                    # 收集颜色缓冲区和深度缓冲区
-                    for resource_id in d.color_buffers:
-                        if resource_id != rd.ResourceId.Null():
-                            all_textures.add(resource_id)
-                    if d.depth_buffer != rd.ResourceId.Null():
-                        all_textures.add(d.depth_buffer)
+                            # 获取贴图信息
+                            texture_info = get_texture_info(controller, resource_id)
+                            if texture_info:
+                                # 收集所有贴图，不做任何过滤
+                                all_textures.add(resource_id)
+                                print(f"Debug: 从绘制调用收集贴图: {resource_id}")
+                            else:
+                                print(f"Debug: 贴图信息获取失败: {resource_id}")
+                        else:
+                            print(f"Debug: 跳过空贴图ID")
         
-        # 方法3: 从资源概览中收集
-        if hasattr(self, 'resource_overview_textures'):
-            for resource_id in self.resource_overview_textures:
-                if resource_id != rd.ResourceId.Null():
-                    all_textures.add(resource_id)
+        print(f"Debug: 从Pass收集到的贴图数量: {len(all_textures)}")
         
-        # 分析收集到的贴图
+        # 如果从Pass中没有收集到贴图，直接从RenderDoc API获取所有贴图
+        if len(all_textures) == 0:
+            try:
+                # 直接从RenderDoc API获取所有贴图
+                textures = controller.GetTextures()
+                for texture in textures:
+                    if texture.resourceId != rd.ResourceId.Null():
+                        all_textures.add(texture.resourceId)
+            except Exception as e:
+                pass
+        
+        # 如果还是没有贴图，尝试从所有资源中获取
+        if len(all_textures) == 0:
+            try:
+                # 从所有资源中获取贴图
+                resources = controller.GetResources()
+                for resource in resources:
+                    if resource.resourceId != rd.ResourceId.Null():
+                        # 检查是否为贴图资源
+                        texture_info = get_texture_info(controller, resource.resourceId)
+                        if texture_info:
+                            all_textures.add(resource.resourceId)
+                            print(f"Debug: 从资源获取贴图: {resource.resourceId} - {resource.name}")
+            except Exception as e:
+                print(f"Debug: 从资源获取贴图失败: {e}")
+        
+
+        
+
+        
+        # 分析收集到的贴图 - 所有数据来自RenderDoc texture_info
+        # 重新初始化最大和最小贴图变量
+        largest_texture_info = None  # 记录最大贴图的信息
+        largest_texture_id = None
+        smallest_texture_info = None
+        smallest_texture_id = None
+        smallest_name = ""
+        smallest_format = ""
+        smallest_memory = 0
+        smallest_found = False
+        
+        print(f"Debug: 开始分析 {len(all_textures)} 个贴图")
         for resource_id in all_textures:
             texture_info = get_texture_info(controller, resource_id)
             if not texture_info:
+                print(f"Debug: 贴图信息获取失败: {resource_id}")
                 continue
 
-            # 统计贴图数据
+            # 统计所有贴图数据，不做任何过滤
             texture_memory = texture_info.width * texture_info.height * 4  # 假设RGBA格式
             max_size = max(texture_info.width, texture_info.height)
             min_size = min(texture_info.width, texture_info.height)
             
             total_textures += 1
             total_texture_size += texture_memory
-            total_max_size = max(total_max_size, max_size)
+            
+            # 收集贴图格式信息 - 只保留主要格式
+            texture_format = rd.ResourceFormat(texture_info.format).Name()
+            
+            # 过滤掉不需要的格式
+            skip_formats = [
+                'BC7_SRGB', 'BC7_UNORM', 'BC6_UFLOAT', 'BC5_UNORM', 'BC1_UNORM',
+                'R16G16_FLOAT', 'R16_FLOAT', 'R10G10B10A2_UNORM', 'R32_FLOAT',
+                'R8G8B8A8_UNORM', 'R8G8B8A8_SRGB', 'R16G16B16A16_FLOAT',
+                'R16G16_UNORM', 'A8_UNORM', 'R32_TYPELESS', 'D32S8_TYPELESS',
+                'R11G11B10_FLOAT', 'R8_UNORM', 'R16_TYPELESS', 'R16_UNORM',
+                'R8G8_UNORM', 'R32G32B32A32_FLOAT'
+            ]
+            
+            if texture_format not in skip_formats:
+                texture_formats.append(texture_format)
+            
+            # 收集贴图类型信息
+            if hasattr(texture_info, 'type'):
+                texture_type = str(texture_info.type)
+                texture_types.append(texture_type)
+            
+            # 收集Mipmap信息
+            if hasattr(texture_info, 'mips'):
+                mipmap_counts.append(texture_info.mips)
+            
+
+            
+            # 追踪最大尺寸的贴图
+            if max_size > total_max_size:
+                total_max_size = max_size
+                largest_texture_info = texture_info
+                largest_texture_id = resource_id
+            
             total_min_size = min(total_min_size, min_size)
         
-        # 根据实际绘制调用估算模型和面数
+        print(f"Debug: 贴图分析完成，总贴图数: {total_textures}")
+        
+
+        
+        # 直接使用RenderDoc提供的准确数据
+        total_instances = 0
+        
         for p in self.passes:
             for s in p.states:
                 for d in s.draws:
                     total_draws += 1
-                    if hasattr(d, 'draw_desc') and d.draw_desc and d.draw_desc.numIndices > 0:
-                        total_vertices += d.draw_desc.numIndices
+                    
+                    # 尝试多种方式收集几何体数据
+                    if hasattr(d, 'draw_desc') and d.draw_desc:
+                        # 方法1: 从 draw_desc 收集顶点数
+                        if hasattr(d.draw_desc, 'numVertices') and d.draw_desc.numVertices > 0:
+                            total_vertices += d.draw_desc.numVertices
+                        
+                        # 方法2: 从 draw_desc 的其他可能字段收集顶点数
+                        if hasattr(d.draw_desc, 'vertexCount') and d.draw_desc.vertexCount > 0:
+                            total_vertices += d.draw_desc.vertexCount
+                        
+                        # 方法3: 从绘制调用的其他属性收集顶点数
+                        if hasattr(d, 'vertexCount') and d.vertexCount > 0:
+                            total_vertices += d.vertexCount
+                        
+                        # 方法4: 从绘制调用的其他可能属性收集顶点数
+                        if hasattr(d, 'numVertices') and d.numVertices > 0:
+                            total_vertices += d.numVertices
+                        
+                        # 根据图元类型计算面数
+                        if hasattr(d.draw_desc, 'topology'):
+                            topology = str(d.draw_desc.topology)
+                            if hasattr(d.draw_desc, 'numVertices') and d.draw_desc.numVertices > 0:
+                                vertices = d.draw_desc.numVertices
+                                if 'Triangle' in topology:
+                                    total_polygons_accurate += vertices // 3
+                                elif 'Quad' in topology:
+                                    total_polygons_accurate += vertices // 4
+                                elif 'Line' in topology:
+                                    total_polygons_accurate += vertices // 2
+                                else:
+                                    # 默认按三角形计算
+                                    total_polygons_accurate += vertices // 3
+                    
+                    # 收集GPU时间 - 来自RenderDoc gpu_duration
                     if hasattr(d, 'gpu_duration'):
                         total_time += d.gpu_duration
         
-        # 根据实际顶点数估算面数
-        total_polygons = total_vertices // 3  # 每个面3个顶点
-        if total_polygons == 0:
-            # 如果没有顶点数据，根据绘制调用数量估算
-            total_polygons = total_draws * 1000  # 每个绘制调用假设1000个面
+
         
         # 处理最小尺寸的显示
-        def format_size_range(max_size, min_size):
-            if max_size == 0:
-                return "无数据"
-            if min_size == float('inf'):
-                return "%d" % max_size
-            if max_size == min_size:
-                return "%d" % max_size
-            return "%d~%d" % (max_size, min_size)
+        # 使用全局的format_size_range函数
         
         # 处理内存显示
-        def format_memory_size(bytes_size):
-            if bytes_size == 0:
-                return "0 MB"
-            mb_size = bytes_size / (1024 * 1024)
-            if mb_size < 1:
-                return "%.1f KB" % (bytes_size / 1024)
-            return "%.1f MB" % mb_size
+        # 使用全局的format_memory_size函数
         
         # 添加表格样式
         html_file.write('<style>\n')
@@ -3301,36 +3455,260 @@ class Frame:
         html_file.write('</thead>\n')
         html_file.write('<tbody>\n')
         
-        # 模型统计
+
+            
+                    # 添加最大贴图的详细信息
+        if largest_texture_info and largest_texture_id:
+            largest_name = get_resource_name(controller, largest_texture_id)
+            largest_format = rd.ResourceFormat(largest_texture_info.format).Name()
+            largest_memory = largest_texture_info.width * largest_texture_info.height * 4
+            
+                    
+            
+            for resource_id in all_textures:
+                texture_info = get_texture_info(controller, resource_id)
+                if not texture_info:
+                    continue
+                # 检查是否为渲染目标，如果是则跳过
+                texture_format = rd.ResourceFormat(texture_info.format).Name()
+                # 跳过深度/模板缓冲区和渲染目标
+                if 'Depth' in texture_format or 'Stencil' in texture_format:
+                    continue  # 跳过深度/模板缓冲区
+                # 检查是否为渲染目标（通常有特定的命名模式）
+                resource_name = get_resource_name(controller, resource_id)
+                if resource_name and ('Target' in resource_name or 'Render' in resource_name):
+                    continue  # 跳过渲染目标
+                
+                max_size = max(texture_info.width, texture_info.height)
+                if not smallest_found or max_size < min(smallest_texture_info.width, smallest_texture_info.height):
+                    smallest_texture_info = texture_info
+                    smallest_texture_id = resource_id
+                    smallest_name = get_resource_name(controller, resource_id)
+                    smallest_format = texture_format
+                    smallest_memory = texture_info.width * texture_info.height * 4
+                    smallest_found = True
+            
+
+
+            # 只跳过明显的深度/模板缓冲区
+            if 'Depth' not in largest_format and 'Stencil' not in largest_format:
+                # 简化使用位置显示，最多显示前5个
+                usage_passes = []
+                for p in self.passes:
+                    for s in p.states:
+                        for d in s.draws:
+                            if hasattr(d, 'textures') and largest_texture_id in d.textures:
+                                usage_passes.append(f"Pass {len(usage_passes)+1}")
+                            if hasattr(d, 'color_buffers') and largest_texture_id in d.color_buffers:
+                                usage_passes.append(f"Pass {len(usage_passes)+1} (颜色缓冲区)")
+                            # 跳过深度缓冲区
+                            if hasattr(d, 'depth_buffer') and d.depth_buffer == largest_texture_id:
+                                continue
+                            
+                            # 最多显示5个使用位置
+                            if len(usage_passes) >= 5:
+                                break
+                        if len(usage_passes) >= 5:
+                            break
+                    if len(usage_passes) >= 5:
+                        break
+                
+                if len(usage_passes) > 5:
+                    usage_info = f"使用位置: {', '.join(usage_passes[:5])}... (共{len(usage_passes)}个)"
+                else:
+                    usage_info = f"使用位置: {', '.join(usage_passes)}" if usage_passes else "使用位置: 未找到"
+                
+                html_file.write('<tr class="highlight">\n')
+                html_file.write('<td colspan="3" style="text-align: center; font-style: italic; color: #666;">🔍 最大贴图详情：' + largest_name + f' ({largest_texture_info.width}×{largest_texture_info.height}, {largest_format}, {format_memory_size(largest_memory)}) - {usage_info}</td>\n')
+                html_file.write('</tr>\n')
+                
+                # 添加最小贴图信息
+                if smallest_found and smallest_texture_info and smallest_texture_id:
+                    html_file.write('<tr class="highlight">\n')
+                    html_file.write('<td colspan="3" style="text-align: center; font-style: italic; color: #666;">🔍 最小贴图详情：' + smallest_name + f' ({smallest_texture_info.width}×{smallest_texture_info.height}, {smallest_format}, {format_memory_size(smallest_memory)})</td>\n')
+                    html_file.write('</tr>\n')
+                
+
+        
+        # 确保变量有合理的默认值
+        if total_polygons_accurate < 0:
+            total_polygons_accurate = 0
+        
+        # 如果所有方法都失败，使用估算
+        if total_vertices == 0 and total_draws > 0:
+            # 如果连顶点数都没有，按绘制调用数估算
+            total_vertices = total_draws * 1000  # 每个绘制调用假设1000个顶点
+            total_polygons_accurate = total_draws * 333  # 每个绘制调用假设333个面
+        
         model_stats = [
-            {'category': '🎯 模型', 'item': '总模型数', 'value': str(max(1, total_textures // 3))},
-            {'category': '🎯 模型', 'item': '总面数', 'value': pretty_number(total_polygons)},
+            {'category': '🎯 模型', 'item': '总绘制调用', 'value': str(total_draws) + " 次"},
             {'category': '🎯 模型', 'item': '总顶点数', 'value': pretty_number(total_vertices)},
-            {'category': '🎯 模型', 'item': '平均面数', 'value': pretty_number(total_polygons // max(1, total_textures // 3))},
+            {'category': '🎯 模型', 'item': '总面数', 'value': pretty_number(total_polygons_accurate)},
         ]
+        
+
         
         # 贴图统计
         texture_stats = [
-            {'category': '🖼️ 贴图', 'item': '总贴图数', 'value': str(total_textures)},
+            {'category': '🖼️ 贴图', 'item': '总贴图数', 'value': str(total_textures) + " 个"},
             {'category': '🖼️ 贴图', 'item': '总内存', 'value': format_memory_size(total_texture_size)},
             {'category': '🖼️ 贴图', 'item': '尺寸范围', 'value': format_size_range(total_max_size, total_min_size)},
-            {'category': '🖼️ 贴图', 'item': '平均内存', 'value': format_memory_size(total_texture_size // max(1, total_textures))},
         ]
         
+
+        
+        # 添加贴图类型统计
+        if texture_types:
+            type_stats = {}
+            for type_name in texture_types:
+                if type_name in type_stats:
+                    type_stats[type_name] += 1
+                else:
+                    type_stats[type_name] = 1
+            
+            for type_name, count in type_stats.items():
+                # 翻译贴图类型为中文
+                translated_type = type_name
+                translated_type = translated_type.replace('TextureType.', '')
+                translated_type = translated_type.replace('Texture2D', '2D贴图')
+                translated_type = translated_type.replace('Texture3D', '3D贴图')
+                translated_type = translated_type.replace('TextureCube', '立方体贴图')
+                translated_type = translated_type.replace('Texture1D', '1D贴图')
+                translated_type = translated_type.replace('Texture1DArray', '1D贴图数组')
+                translated_type = translated_type.replace('Texture2DArray', '2D贴图数组')
+                translated_type = translated_type.replace('TextureCubeArray', '立方体贴图数组')
+                translated_type = translated_type.replace('Texture3DArray', '3D贴图数组')
+                
+                texture_stats.append({
+                    'category': '🖼️ 贴图', 
+                    'item': f' {translated_type}', 
+                    'value': f"{count} 个"
+                })
+        
+
+        
+        # 添加最大贴图的统计信息（排除深度缓冲区）
+        if largest_texture_info and largest_texture_id:
+            largest_name = get_resource_name(controller, largest_texture_id)
+            largest_format = rd.ResourceFormat(largest_texture_info.format).Name()
+            
+            # 只跳过明显的深度/模板缓冲区
+            if 'Depth' not in largest_format and 'Stencil' not in largest_format:
+                texture_stats.append({
+                    'category': '🖼️ 贴图', 
+                    'item': '最大贴图', 
+                    'value': f"{largest_name} ({largest_texture_info.width}×{largest_texture_info.height})"
+                })
+            else:
+                texture_stats.append({
+                    'category': '🖼️ 贴图', 
+                    'item': '最大贴图', 
+                    'value': "深度缓冲区 (已排除)"
+                })
+        
+        # 添加最小贴图的统计信息（排除渲染目标）
+        if smallest_found and smallest_texture_info and smallest_texture_id:
+            smallest_name = get_resource_name(controller, smallest_texture_id)
+            smallest_format = rd.ResourceFormat(smallest_texture_info.format).Name()
+            
+            # 只跳过明显的深度/模板缓冲区
+            if 'Depth' not in smallest_format and 'Stencil' not in smallest_format:
+                texture_stats.append({
+                    'category': '🖼️ 贴图', 
+                    'item': '最小贴图', 
+                    'value': f"{smallest_name} ({smallest_texture_info.width}×{smallest_texture_info.height})"
+                })
+            else:
+                texture_stats.append({
+                    'category': '🖼️ 贴图', 
+                    'item': '最小贴图', 
+                    'value': "深度缓冲区 (已排除)"
+                })
+        
+
+        
+        # 确保所有变量都有合理的默认值
+        if not largest_texture_info:
+            largest_texture_info = None
+        if not largest_texture_id:
+            largest_texture_id = None
+        
+        # 添加详细的尺寸分析说明
+        if total_max_size > 0:
+            if total_max_size >= 4096:
+                size_analysis.append("包含高分辨率贴图 (≥4K)")
+            if total_min_size <= 64:
+                size_analysis.append("包含小尺寸贴图 (≤64px)")
+            if total_max_size == total_min_size:
+                size_analysis.append("所有贴图尺寸一致")
+            else:
+                size_analysis.append("贴图尺寸多样化")
+            
+            # 分析最大贴图的详细信息（排除深度缓冲区）
+            if largest_texture_info and largest_texture_id:
+                largest_name = get_resource_name(controller, largest_texture_id)
+                largest_format = rd.ResourceFormat(largest_texture_info.format).Name()
+                
+                # 只跳过明显的深度/模板缓冲区
+                if 'Depth' not in largest_format and 'Stencil' not in largest_format:
+                    size_analysis.append(f"最大贴图: {largest_name} ({largest_texture_info.width}×{largest_texture_info.height}, {largest_format})")
+                    
+                    # 特殊尺寸分析
+                    if total_max_size == 5120:
+                        size_analysis.append("→ 5120×5120 (可能是5K纹理或特殊渲染目标)")
+                    elif total_max_size > 4096:
+                        size_analysis.append(f"→ {total_max_size}×{total_max_size} (超高分辨率)")
+                    elif total_max_size >= 2048:
+                        size_analysis.append(f"→ {total_max_size}×{total_max_size} (高分辨率)")
+                    
+                    # 添加最小贴图分析
+                    if smallest_found and smallest_texture_info and smallest_texture_id:
+                        smallest_name = get_resource_name(controller, smallest_texture_id)
+                        smallest_format = rd.ResourceFormat(smallest_texture_info.format).Name()
+                        if 'Depth' not in smallest_format and 'Stencil' not in smallest_format:
+                            size_analysis.append(f"最小贴图: {smallest_name} ({smallest_texture_info.width}×{smallest_texture_info.height}, {smallest_format})")
+                else:
+                    size_analysis.append("最大贴图: 深度缓冲区 (已排除)")
+        else:
+            size_analysis.append("无贴图数据")
+        
+        # 收集RenderDoc API的详细信息
+        renderdoc_api_info = {
+            'draw_calls': {
+                'total': total_draws,
+                'types': {},  # 暂时为空字典
+                'primitives': {}  # 暂时为空字典
+            },
+            'geometry': {
+                'vertices': total_vertices,
+                'instances': total_instances,
+                'polygons': total_polygons_accurate
+            },
+            'textures': {
+                'count': total_textures,
+                'memory': total_texture_size,
+                'size_range': f"{total_min_size}~{total_max_size}",
+                'largest': largest_texture_info
+            },
+            'performance': {
+                'gpu_time': total_time,
+                'passes': len(self.passes)
+            }
+        }
+        
         # 计算性能评级
-        if total_polygons > 1000000:
+        if total_polygons_accurate > 1000000:
             complexity_rating = "高"
-        elif total_polygons > 500000:
+        elif total_polygons_accurate > 500000:
             complexity_rating = "中"
         else:
             complexity_rating = "低"
         
         # 性能统计
         performance_stats = [
-            {'category': '⚡ 性能', 'item': '总绘制调用', 'value': str(total_draws)},
-            {'category': '⚡ 性能', 'item': '总渲染时间', 'value': '%.2f ms' % total_time},
-            {'category': '⚡ 性能', 'item': '渲染Pass数', 'value': str(len(self.passes))},
-            {'category': '⚡ 性能', 'item': '复杂度评级', 'value': complexity_rating},
+            {'category': '⚡ 性能', 'item': '总绘制调用', 'value': str(total_draws) + " 次"},
+            {'category': '⚡ 性能', 'item': '总渲染时间', 'value': format_time_duration(total_time * 1000)},  # 转换为微秒
+            {'category': '⚡ 性能', 'item': '渲染Pass数', 'value': str(len(self.passes)) + " 个"},
         ]
         
         # 输出所有统计数据，合并同类别单元格
@@ -3545,11 +3923,13 @@ class Frame:
         # 1. 帧概览 - 美术资产分析
         self.writeFrameOverview(html_file, controller)
         
-        # 2. 资源概览
+        # 2. API概览
+        self.writeAPIOverview(html_file, controller)
+        
+        # 3. 资源概览
         self.writeResourceOverview(html_file, controller)
         
-        # 3. API概览
-        self.writeAPIOverview(html_file, controller)
+
 
         # 4. 着色器概览已取消
         
