@@ -1884,6 +1884,54 @@ html_head = """
             box-shadow: 0 4px 12px rgba(0,0,0,0.15);
         }
         /* 其余已有样式保持不变 */
+        /* 表格样式 */
+        .pass-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 12px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.1);
+        }
+        .pass-table thead {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .pass-table th {
+            padding: 16px 12px;
+            text-align: left;
+            font-weight: 600;
+            border: none;
+        }
+        .pass-table td {
+            padding: 0;
+            border: none;
+            vertical-align: top;
+        }
+        .pass-table tbody tr {
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .pass-table tbody tr:hover {
+            background-color: #f8f9fa;
+        }
+        /* Pass详细信息样式 */
+        .pass-detail-cell {
+            padding: 0 !important;
+            border: none !important;
+        }
+        .pass-detail-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 15px 20px;
+            border-radius: 8px 8px 0 0;
+            margin-bottom: 0;
+        }
+        .pass-detail-title {
+            font-size: 18px;
+            font-weight: 700;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
 </style>
 
 
@@ -2071,8 +2119,7 @@ class Pass:
                     if hasattr(draw, 'textures') and draw.textures:
                         total_textures += len(draw.textures)
         
-        # Pass section with enhanced card layout
-        html_file.write('<div class="pass-section">\n')
+        # 不生成外层的pass-section，因为现在在表格中
         html_file.write('<div class="pass-header">\n')
         html_file.write('<div class="pass-title">🎯 %s</div>\n' % pass_name)
         html_file.write('<div class="pass-stats">\n')
@@ -2108,7 +2155,6 @@ class Pass:
                 # 单个绘制调用
                 states[0].writeIndexHtml(html_file, controller)
         
-        html_file.write('</div>\n')
         html_file.write('</div>\n')
 
     def exportResources(self, controller):
@@ -2872,7 +2918,7 @@ class Draw(Event):
     def writeIndexHtml(self, html_file, controller):
         global g_assets_folder
 
-        html_file.write('<div class="pass-section">\n')
+        # 不生成外层的pass-section，因为现在在表格中
         html_file.write('<div class="pass-header">\n')
         html_file.write('<div class="pass-title">🎯 绘制调用 [D]%04d %s</div>\n' % (self.draw_id, self.name.replace('#', '_')))
         
@@ -2922,7 +2968,6 @@ class Draw(Event):
                 html_file.write('<a href="%s">%s</a>\n' % (file_name, resource_name))
                 html_file.write('</div>\n')
 
-        html_file.write('</div>\n')
         html_file.write('</div>\n')
 
         if not self.isDispatch():
@@ -3513,20 +3558,7 @@ class Frame:
                     if len(usage_passes) >= 5:
                         break
                 
-                if len(usage_passes) > 5:
-                    usage_info = f"使用位置: {', '.join(usage_passes[:5])}... (共{len(usage_passes)}个)"
-                else:
-                    usage_info = f"使用位置: {', '.join(usage_passes)}" if usage_passes else "使用位置: 未找到"
-                
-                html_file.write('<tr class="highlight">\n')
-                html_file.write('<td colspan="3" style="text-align: center; font-style: italic; color: #666;">🔍 最大贴图详情：' + largest_name + f' ({largest_texture_info.width}×{largest_texture_info.height}, {largest_format}, {format_memory_size(largest_memory)}) - {usage_info}</td>\n')
-                html_file.write('</tr>\n')
-                
-                # 添加最小贴图信息
-                if smallest_found and smallest_texture_info and smallest_texture_id:
-                    html_file.write('<tr class="highlight">\n')
-                    html_file.write('<td colspan="3" style="text-align: center; font-style: italic; color: #666;">🔍 最小贴图详情：' + smallest_name + f' ({smallest_texture_info.width}×{smallest_texture_info.height}, {smallest_format}, {format_memory_size(smallest_memory)})</td>\n')
-                    html_file.write('</tr>\n')
+                # 移除最大和最小贴图详情信息
                 
 
         
@@ -3942,8 +3974,30 @@ class Frame:
         html_file.write('</div>\n')
         html_file.write('</div>\n')
         html_file.write('<div class="pass-content-area">\n')
-        for p in self.passes:
+        
+        # 创建表格容器
+        html_file.write('<table class="pass-table">\n')
+        html_file.write('<tbody>\n')
+        
+        # 遍历所有Pass并显示详细信息
+        for i, p in enumerate(self.passes):
+            html_file.write('<tr>\n')
+            html_file.write('<td class="pass-detail-cell">\n')
+            
+            # 显示Pass标题
+            html_file.write('<div class="pass-detail-header">\n')
+            html_file.write('<div class="pass-detail-title">Pass%d</div>\n' % (i + 1))
+            html_file.write('</div>\n')
+            
+            # 显示Pass的详细信息（保持原有的writeIndexHtml调用）
             p.writeIndexHtml(html_file, controller)
+            
+            html_file.write('</td>\n')
+            html_file.write('</tr>\n')
+        
+        html_file.write('</tbody>\n')
+        html_file.write('</table>\n')
+        
         html_file.write('</div>\n')
         html_file.write('</div>\n')
         
